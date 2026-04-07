@@ -8,7 +8,7 @@ Place screenshots inside `docs/screenshots/` such as:
 
 * `dashboard.png` → main Streamlit dashboard
 * `alerts.png` → live intrusion alert detection
-* `model_results.png` → model prediction or performance output
+* `model_results.png` → modepyl prediction or performance output
 
 ## Demo Workflow
 

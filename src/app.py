@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import joblib
 import matplotlib.pyplot as plt
+from sklearn.metrics import confusion_matrix
 from src.live_nmap_detector import run_sniffer_in_thread, live_alerts
 import os
 
@@ -18,36 +19,39 @@ st.set_page_config(
 # START LIVE SNIFFER ONCE
 # -----------------------------------
 if "sniffer_started" not in st.session_state:
-    run_sniffer_in_thread(interface=None)  # Auto-detect interface
-    st.session_state["sniffer_started"] = True
+    try:
+        run_sniffer_in_thread(interface=None)
+        st.session_state["sniffer_started"] = True
+    except Exception:
+        st.warning("Live packet sniffing not available (Npcap/WinPcap not installed).")
 
 # -----------------------------------
 # LOAD MODEL FILES
 # -----------------------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_PATH = os.path.join(BASE_DIR, "..", "models")
 
-rf_model = joblib.load(os.path.join(BASE_DIR, "..", "models", "rf_model.pkl"))
-iso_model = joblib.load(os.path.join(BASE_DIR, "..", "models", "iso_model.pkl"))
-scaler = joblib.load(os.path.join(BASE_DIR, "..", "models", "scaler.pkl"))
-columns = joblib.load(os.path.join(BASE_DIR, "..", "models", "columns.pkl"))
+rf_model = joblib.load(os.path.join(MODEL_PATH, "best_model.pkl"))
+iso_model = joblib.load(os.path.join(MODEL_PATH, "iso_model.pkl"))
+scaler = joblib.load(os.path.join(MODEL_PATH, "scaler.pkl"))
+columns = joblib.load(os.path.join(MODEL_PATH, "columns.pkl"))
 
 # -----------------------------------
 # TITLE
 # -----------------------------------
-st.title("🛡️ Machine Learning-Based Network Intrusion Detection System")
+st.title("Machine Learning-Based Network Intrusion Detection System")
 st.caption("Real-Time Nmap Detection + CSV-Based ML Intrusion Detection")
 
 # -----------------------------------
 # LIVE ALERT SECTION
 # -----------------------------------
-st.subheader("🚨 Live Nmap Scan Detection")
+st.subheader("Live Nmap Scan Detection")
 
 if live_alerts:
     live_df = pd.DataFrame(live_alerts)
 
-    st.error("⚠ Live suspicious scan activity detected!")
+    st.error("Live suspicious scan activity detected")
 
-    # Metrics
     col1, col2, col3 = st.columns(3)
     col1.metric("Live Alerts", len(live_df))
     col2.metric("Unique Attackers", live_df["src_ip"].nunique())
@@ -55,7 +59,6 @@ if live_alerts:
 
     st.dataframe(live_df, use_container_width=True)
 
-    # Live alert bar chart
     attacker_counts = live_df["src_ip"].value_counts()
     fig_live, ax_live = plt.subplots()
     attacker_counts.plot(kind="bar", ax=ax_live)
@@ -65,14 +68,14 @@ if live_alerts:
     st.pyplot(fig_live)
 
 else:
-    st.info("No live scan alerts yet. Run Nmap from the attacker VM, then click Rerun / refresh.")
+    st.info("No live scan alerts yet. Run Nmap from attacker machine and refresh.")
 
 st.divider()
 
 # -----------------------------------
 # CSV ML SECTION
 # -----------------------------------
-st.subheader("📂 CSV-Based ML Intrusion Detection")
+st.subheader("CSV-Based ML Intrusion Detection")
 uploaded_file = st.file_uploader("Upload Network Traffic CSV", type=["csv"])
 
 if uploaded_file:
@@ -80,49 +83,95 @@ if uploaded_file:
         data = pd.read_csv(uploaded_file, header=None)
         label_column = data.columns[-2]
 
-        # Build features
+        # Feature processing
         X = pd.get_dummies(data.drop(label_column, axis=1))
         X = X.reindex(columns=columns, fill_value=0)
         X_scaled = scaler.transform(X)
 
-        # Predict
+        # Prediction
         predictions = rf_model.predict(X_scaled)
         data["prediction"] = predictions
-
-        # Create readable attack_type column
-        data["attack_type"] = data["prediction"].apply(lambda x: "Attack" if x == 1 else "Normal")
+        data["attack_type"] = data["prediction"].apply(
+            lambda x: "Attack" if x == 1 else "Normal"
+        )
 
         attacks = data[data["prediction"] == 1]
         normal = data[data["prediction"] == 0]
 
         # Metrics
-        st.subheader("📊 Traffic Summary")
+        st.subheader("Traffic Summary")
         c1, c2, c3 = st.columns(3)
         c1.metric("Total Traffic", len(data))
         c2.metric("Detected Attacks", len(attacks))
         c3.metric("Normal Traffic", len(normal))
 
         if len(attacks) > 0:
-            st.error("⚠ Intrusion Detected!")
+            st.error("Intrusion Detected")
         else:
-            st.success("✅ No attacks detected in uploaded file.")
+            st.success("No attacks detected")
 
-        # Show data
-        st.subheader("📋 Prediction Results")
+        # Table
+        st.subheader("Prediction Results")
         st.dataframe(data, use_container_width=True)
+
+        # -----------------------------------
+        # CONFUSION MATRIX
+        # -----------------------------------
+        try:
+            y_true = data[label_column].apply(
+                lambda x: 0 if str(x).lower() == "normal" else 1
+            )
+            y_pred = data["prediction"]
+
+            cm = confusion_matrix(y_true, y_pred)
+            TN, FP, FN, TP = cm.ravel()
+
+            st.subheader("Confusion Matrix Analysis")
+
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("True Negative", TN)
+            m2.metric("False Positive", FP)
+            m3.metric("False Negative", FN)
+            m4.metric("True Positive", TP)
+
+            st.info(
+                f"False Positives: {FP} normal traffic flagged as attack | "
+                f"False Negatives: {FN} attacks missed (critical)"
+            )
+
+            fig_cm, ax_cm = plt.subplots()
+            ax_cm.imshow(cm)
+
+            ax_cm.set_title("Confusion Matrix")
+            ax_cm.set_xlabel("Predicted")
+            ax_cm.set_ylabel("Actual")
+
+            ax_cm.set_xticks([0, 1])
+            ax_cm.set_yticks([0, 1])
+            ax_cm.set_xticklabels(["Normal", "Attack"])
+            ax_cm.set_yticklabels(["Normal", "Attack"])
+
+            for i in range(2):
+                for j in range(2):
+                    ax_cm.text(j, i, cm[i][j], ha="center", va="center")
+
+            st.pyplot(fig_cm)
+
+        except Exception:
+            st.warning("Confusion matrix not available (no labels detected).")
 
         # -----------------------------------
         # CHARTS
         # -----------------------------------
-        st.subheader("📈 Visual Analytics")
+        st.subheader("Visual Analytics")
 
-        chart_col1, chart_col2 = st.columns(2)
+        colA, colB = st.columns(2)
 
         # Pie chart
-        with chart_col1:
-            traffic_counts = data["prediction"].value_counts()
-            normal_count = traffic_counts.get(0, 0)
-            attack_count = traffic_counts.get(1, 0)
+        with colA:
+            counts = data["prediction"].value_counts()
+            normal_count = counts.get(0, 0)
+            attack_count = counts.get(1, 0)
 
             fig1, ax1 = plt.subplots()
             ax1.pie(
@@ -136,26 +185,24 @@ if uploaded_file:
             st.pyplot(fig1)
 
         # Bar chart
-        with chart_col2:
+        with colB:
             attack_types = data[data["prediction"] == 1]["attack_type"].value_counts()
             if not attack_types.empty:
                 fig2, ax2 = plt.subplots()
                 attack_types.plot(kind="bar", ax=ax2)
-                ax2.set_title("Attack Types Detected")
-                ax2.set_xlabel("Attack Type")
+                ax2.set_title("Attack Types")
+                ax2.set_xlabel("Type")
                 ax2.set_ylabel("Count")
                 st.pyplot(fig2)
             else:
-                st.info("No attack types to display.")
+                st.info("No attack types detected.")
 
-        # -----------------------------------
-        # SIMPLE TRAFFIC TREND (line chart)
-        # -----------------------------------
-        st.subheader("📉 Traffic Trend (by Row Index)")
+        # Line chart
+        st.subheader("Traffic Trend")
         trend_df = data["prediction"].reset_index()
-        trend_df.columns = ["Traffic Index", "Prediction"]
+        trend_df.columns = ["Index", "Prediction"]
 
-        st.line_chart(trend_df.set_index("Traffic Index"))
+        st.line_chart(trend_df.set_index("Index"))
 
     except Exception as e:
         st.error(f"Error processing CSV: {e}")
